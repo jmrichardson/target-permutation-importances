@@ -331,7 +331,7 @@ def compute(
     model_cls_params: Dict,
     model_fit_params: Union[ModelFitParamsBuilderType, Dict],
     X: XType,
-    y: YType,
+    y: Union[YType, List[YType]],  # Allow single or list of targets
     num_actual_runs: PositiveInt = 2,
     num_random_runs: PositiveInt = 10,
     shuffle_feature_order: bool = False,
@@ -406,11 +406,18 @@ def compute(
         return X
 
     def _y_builder(is_random_run: bool, run_idx: int) -> YType:
+        # Ensure y is treated as a list of targets
+        if not isinstance(y, list):
+            target = y  # Single target
+        else:
+            target_idx = run_idx % len(y)  # Use modulus to cycle through targets
+            target = y[target_idx]
+
         rng = np.random.default_rng(seed=run_idx)
         if is_random_run:
-            # Only shuffle the target for random runs
-            return rng.permutation(y)
-        return y
+            # Shuffle the selected target for random runs
+            return rng.permutation(target)
+        return target
 
     def _model_builder(is_random_run: bool, run_idx: int) -> Any:
         # Model random state should be different for each run for both
