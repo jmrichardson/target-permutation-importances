@@ -4,13 +4,16 @@ The core APIs of this library.
 
 import gc
 from functools import partial
+from typing import Any, Dict, List, Union, Tuple
 
 import numpy as np
 import pandas as pd
 from beartype import beartype
-from beartype.typing import Any, Dict, List, Union, Tuple
+from beartype.typing import Union as TypingUnion
 from scipy.stats import wasserstein_distance  # type: ignore
 from tqdm import tqdm
+
+import dask.dataframe as dd  # Added import for Dask DataFrames
 
 from target_permutation_importances.typing import (
     ModelBuilderType,
@@ -27,186 +30,360 @@ from target_permutation_importances.typing import (
 
 
 def compute_permutation_importance_by_subtraction(
-    actual_importance_dfs: List[pd.DataFrame], random_importance_dfs: List[pd.DataFrame]
-) -> pd.DataFrame:
+        actual_importance_dfs: List[TypingUnion[pd.DataFrame, dd.DataFrame]],
+        random_importance_dfs: List[TypingUnion[pd.DataFrame, dd.DataFrame]],
+) -> TypingUnion[pd.DataFrame, dd.DataFrame]:
     """
-    Given a list of actual importance DataFrames and a list of random importance compute
-    the permutation importance by I_f = Avg(A_f) - Avg(R_f)
+    Compute permutation importance by subtraction: I_f = Avg(A_f) - Avg(R_f)
+
+    Handles both Pandas and Dask DataFrames.
 
     Args:
-        actual_importance_dfs (List[pd.DataFrame]): list of random importance DataFrames with columns ["feature", "importance"]
-        random_importance_dfs (List[pd.DataFrame]): list of random importance DataFrames with columns ["feature", "importance"]
+        actual_importance_dfs (List[Union[pd.DataFrame, dd.DataFrame]]):
+            List of actual importance DataFrames with columns ["feature", "importance"]
+        random_importance_dfs (List[Union[pd.DataFrame, dd.DataFrame]]):
+            List of random importance DataFrames with columns ["feature", "importance"]
 
     Returns:
-        pd.DataFrame: The return DataFrame with columns ["feature", "importance"]
+        Union[pd.DataFrame, dd.DataFrame]: DataFrame with permutation importance and statistics
     """
-    # Calculate the mean importance
-    actual_importance_df = pd.concat(actual_importance_dfs)
-    mean_actual_importance_df = actual_importance_df.groupby("feature").mean()
-    std_actual_importance_df = actual_importance_df.groupby("feature").std()
+    if len(actual_importance_dfs) == 0 or len(random_importance_dfs) == 0:
+        raise ValueError("Importance DataFrames lists cannot be empty.")
 
-    # Calculate the mean random importance
-    random_importance_df = pd.concat(random_importance_dfs)
-    mean_random_importance_df = random_importance_df.groupby("feature").mean()
-    std_random_importance_df = random_importance_df.groupby("feature").std()
+    # Determine the type based on the first DataFrame
+    is_dask = isinstance(actual_importance_dfs[0], dd.DataFrame)
 
-    # Sort by feature name to make sure the order is the same
-    mean_actual_importance_df = mean_actual_importance_df.sort_index()
-    std_actual_importance_df = std_actual_importance_df.sort_index()
-    mean_random_importance_df = mean_random_importance_df.sort_index()
-    std_random_importance_df = std_random_importance_df.sort_index()
-    assert (mean_random_importance_df.index == mean_actual_importance_df.index).all()
+    if is_dask:
+        # Concatenate using Dask
+        actual_importance_df = dd.concat(actual_importance_dfs)
+        random_importance_df = dd.concat(random_importance_dfs)
 
-    mean_actual_importance_df["mean_actual_importance"] = mean_actual_importance_df[
-        "importance"
-    ]
-    mean_actual_importance_df["std_actual_importance"] = std_actual_importance_df[
-        "importance"
-    ]
-    mean_actual_importance_df["mean_random_importance"] = mean_random_importance_df[
-        "importance"
-    ]
-    mean_actual_importance_df["importance"] = (
-        mean_actual_importance_df["importance"] - mean_random_importance_df["importance"]
-    )
-    mean_actual_importance_df["std_random_importance"] = std_random_importance_df[
-        "importance"
-    ]
-    return mean_actual_importance_df[
-        [
+        # Group by 'feature' and compute mean and std
+        mean_actual_importance_df = actual_importance_df.groupby("feature").mean()
+        std_actual_importance_df = actual_importance_df.groupby("feature").std()
+
+        mean_random_importance_df = random_importance_df.groupby("feature").mean()
+        std_random_importance_df = random_importance_df.groupby("feature").std()
+
+        # Sort by feature name
+        mean_actual_importance_df = mean_actual_importance_df.sort_index()
+        std_actual_importance_df = std_actual_importance_df.sort_index()
+        mean_random_importance_df = mean_random_importance_df.sort_index()
+        std_random_importance_df = std_random_importance_df.sort_index()
+
+        # Ensure indexes match
+        assert (mean_random_importance_df.index == mean_actual_importance_df.index).all().compute()
+
+        # Compute the permutation importance
+        permutation_importance = mean_actual_importance_df["importance"] - mean_random_importance_df["importance"]
+
+        # Assemble the final DataFrame
+        result = mean_actual_importance_df.assign(
+            mean_actual_importance=mean_actual_importance_df["importance"],
+            std_actual_importance=std_actual_importance_df["importance"],
+            mean_random_importance=mean_random_importance_df["importance"],
+            std_random_importance=std_random_importance_df["importance"],
+            importance=permutation_importance,
+        )[[
             "importance",
             "mean_actual_importance",
             "mean_random_importance",
             "std_actual_importance",
             "std_random_importance",
-        ]
-    ].reset_index()
+        ]].reset_index()
+
+        return result
+
+    else:
+        # Concatenate using Pandas
+        actual_importance_df = pd.concat(actual_importance_dfs)
+        random_importance_df = pd.concat(random_importance_dfs)
+
+        # Group by 'feature' and compute mean and std
+        mean_actual_importance_df = actual_importance_df.groupby("feature").mean()
+        std_actual_importance_df = actual_importance_df.groupby("feature").std()
+
+        mean_random_importance_df = random_importance_df.groupby("feature").mean()
+        std_random_importance_df = random_importance_df.groupby("feature").std()
+
+        # Sort by feature name
+        mean_actual_importance_df = mean_actual_importance_df.sort_index()
+        std_actual_importance_df = std_actual_importance_df.sort_index()
+        mean_random_importance_df = mean_random_importance_df.sort_index()
+        std_random_importance_df = std_random_importance_df.sort_index()
+
+        # Ensure indexes match
+        assert (mean_random_importance_df.index == mean_actual_importance_df.index).all()
+
+        # Compute the permutation importance
+        permutation_importance = mean_actual_importance_df["importance"] - mean_random_importance_df["importance"]
+
+        # Assemble the final DataFrame
+        result = mean_actual_importance_df.assign(
+            mean_actual_importance=mean_actual_importance_df["importance"],
+            std_actual_importance=std_actual_importance_df["importance"],
+            mean_random_importance=mean_random_importance_df["importance"],
+            std_random_importance=std_random_importance_df["importance"],
+            importance=permutation_importance,
+        )[[
+            "importance",
+            "mean_actual_importance",
+            "mean_random_importance",
+            "std_actual_importance",
+            "std_random_importance",
+        ]].reset_index()
+
+        return result
 
 
 def compute_permutation_importance_by_division(
-    actual_importance_dfs: List[pd.DataFrame], random_importance_dfs: List[pd.DataFrame]
-) -> pd.DataFrame:
+        actual_importance_dfs: List[TypingUnion[pd.DataFrame, dd.DataFrame]],
+        random_importance_dfs: List[TypingUnion[pd.DataFrame, dd.DataFrame]],
+) -> TypingUnion[pd.DataFrame, dd.DataFrame]:
     """
-    Given a list of actual importance DataFrames and a list of random importance compute
-    the permutation importance by I_f = Avg(A_f) / (Avg(R_f) + 1)
+    Compute permutation importance by division: I_f = Avg(A_f) / (Avg(R_f) + 1)
+
+    Handles both Pandas and Dask DataFrames.
 
     Args:
-        actual_importance_dfs (List[pd.DataFrame]): list of random importance DataFrames with columns ["feature", "importance"]
-        random_importance_dfs (List[pd.DataFrame]): list of random importance DataFrames with columns ["feature", "importance"]
+        actual_importance_dfs (List[Union[pd.DataFrame, dd.DataFrame]]):
+            List of actual importance DataFrames with columns ["feature", "importance"]
+        random_importance_dfs (List[Union[pd.DataFrame, dd.DataFrame]]):
+            List of random importance DataFrames with columns ["feature", "importance"]
 
     Returns:
-        pd.DataFrame: The return DataFrame with columns ["feature", "importance"]
+        Union[pd.DataFrame, dd.DataFrame]: DataFrame with permutation importance and statistics
     """
-    # Calculate the mean importance
-    actual_importance_df = pd.concat(actual_importance_dfs)
-    mean_actual_importance_df = actual_importance_df.groupby("feature").mean()
-    std_actual_importance_df = actual_importance_df.groupby("feature").std()
+    if len(actual_importance_dfs) == 0 or len(random_importance_dfs) == 0:
+        raise ValueError("Importance DataFrames lists cannot be empty.")
 
-    # Calculate the mean random importance
-    random_importance_df = pd.concat(random_importance_dfs)
-    mean_random_importance_df = random_importance_df.groupby("feature").mean()
-    std_random_importance_df = random_importance_df.groupby("feature").std()
+    # Determine the type based on the first DataFrame
+    is_dask = isinstance(actual_importance_dfs[0], dd.DataFrame)
 
-    # Sort by feature name to make sure the order is the same
-    mean_actual_importance_df = mean_actual_importance_df.sort_index()
-    std_actual_importance_df = std_actual_importance_df.sort_index()
-    mean_random_importance_df = mean_random_importance_df.sort_index()
-    std_random_importance_df = std_random_importance_df.sort_index()
+    if is_dask:
+        # Concatenate using Dask
+        actual_importance_df = dd.concat(actual_importance_dfs)
+        random_importance_df = dd.concat(random_importance_dfs)
 
-    assert (mean_random_importance_df.index == mean_actual_importance_df.index).all()
+        # Group by 'feature' and compute mean and std
+        mean_actual_importance_df = actual_importance_df.groupby("feature").mean()
+        std_actual_importance_df = actual_importance_df.groupby("feature").std()
 
-    mean_actual_importance_df["mean_actual_importance"] = mean_actual_importance_df[
-        "importance"
-    ]
-    mean_actual_importance_df["std_actual_importance"] = std_actual_importance_df[
-        "importance"
-    ]
-    mean_actual_importance_df["mean_random_importance"] = mean_random_importance_df[
-        "importance"
-    ]
-    mean_actual_importance_df["importance"] = mean_actual_importance_df["importance"] / (
-        mean_random_importance_df["importance"] + 1
-    )
-    mean_actual_importance_df["std_random_importance"] = std_random_importance_df[
-        "importance"
-    ]
-    return mean_actual_importance_df[
-        [
+        mean_random_importance_df = random_importance_df.groupby("feature").mean()
+        std_random_importance_df = random_importance_df.groupby("feature").std()
+
+        # Sort by feature name
+        mean_actual_importance_df = mean_actual_importance_df.sort_index()
+        std_actual_importance_df = std_actual_importance_df.sort_index()
+        mean_random_importance_df = mean_random_importance_df.sort_index()
+        std_random_importance_df = std_random_importance_df.sort_index()
+
+        # Ensure indexes match
+        assert (mean_random_importance_df.index == mean_actual_importance_df.index).all().compute()
+
+        # Compute the permutation importance
+        permutation_importance = mean_actual_importance_df["importance"] / (mean_random_importance_df["importance"] + 1)
+
+        # Assemble the final DataFrame
+        result = mean_actual_importance_df.assign(
+            mean_actual_importance=mean_actual_importance_df["importance"],
+            std_actual_importance=std_actual_importance_df["importance"],
+            mean_random_importance=mean_random_importance_df["importance"],
+            std_random_importance=std_random_importance_df["importance"],
+            importance=permutation_importance,
+        )[[
             "importance",
             "mean_actual_importance",
             "mean_random_importance",
             "std_actual_importance",
             "std_random_importance",
-        ]
-    ].reset_index()
+        ]].reset_index()
+
+        return result
+
+    else:
+        # Concatenate using Pandas
+        actual_importance_df = pd.concat(actual_importance_dfs)
+        random_importance_df = pd.concat(random_importance_dfs)
+
+        # Group by 'feature' and compute mean and std
+        mean_actual_importance_df = actual_importance_df.groupby("feature").mean()
+        std_actual_importance_df = actual_importance_df.groupby("feature").std()
+
+        mean_random_importance_df = random_importance_df.groupby("feature").mean()
+        std_random_importance_df = random_importance_df.groupby("feature").std()
+
+        # Sort by feature name
+        mean_actual_importance_df = mean_actual_importance_df.sort_index()
+        std_actual_importance_df = std_actual_importance_df.sort_index()
+        mean_random_importance_df = mean_random_importance_df.sort_index()
+        std_random_importance_df = std_random_importance_df.sort_index()
+
+        # Ensure indexes match
+        assert (mean_random_importance_df.index == mean_actual_importance_df.index).all()
+
+        # Compute the permutation importance
+        permutation_importance = mean_actual_importance_df["importance"] / (mean_random_importance_df["importance"] + 1)
+
+        # Assemble the final DataFrame
+        result = mean_actual_importance_df.assign(
+            mean_actual_importance=mean_actual_importance_df["importance"],
+            std_actual_importance=std_actual_importance_df["importance"],
+            mean_random_importance=mean_random_importance_df["importance"],
+            std_random_importance=std_random_importance_df["importance"],
+            importance=permutation_importance,
+        )[[
+            "importance",
+            "mean_actual_importance",
+            "mean_random_importance",
+            "std_actual_importance",
+            "std_random_importance",
+        ]].reset_index()
+
+        return result
 
 
 def compute_permutation_importance_by_wasserstein_distance(
-    actual_importance_dfs: List[pd.DataFrame], random_importance_dfs: List[pd.DataFrame]
-) -> pd.DataFrame:
+        actual_importance_dfs: List[TypingUnion[pd.DataFrame, dd.DataFrame]],
+        random_importance_dfs: List[TypingUnion[pd.DataFrame, dd.DataFrame]],
+) -> TypingUnion[pd.DataFrame, dd.DataFrame]:
     """
-    Given a list of actual importance DataFrames and a list of random importance compute
-    the permutation importance by I_f = wasserstein_distance(A_f, R_f)
+    Compute permutation importance using the Wasserstein distance: I_f = wasserstein_distance(A_f, R_f)
+
+    Handles both Pandas and Dask DataFrames.
 
     Args:
-        actual_importance_dfs (List[pd.DataFrame]): list of random importance DataFrames with columns ["feature", "importance"]
-        random_importance_dfs (List[pd.DataFrame]): list of random importance DataFrames with columns ["feature", "importance"]
+        actual_importance_dfs (List[Union[pd.DataFrame, dd.DataFrame]]):
+            List of actual importance DataFrames with columns ["feature", "importance"]
+        random_importance_dfs (List[Union[pd.DataFrame, dd.DataFrame]]):
+            List of random importance DataFrames with columns ["feature", "importance"]
 
     Returns:
-        pd.DataFrame: The return DataFrame with columns ["feature", "importance"]
+        Union[pd.DataFrame, dd.DataFrame]: DataFrame with permutation importance and statistics
     """
-    # Calculate the mean importance
-    actual_importance_df = pd.concat(actual_importance_dfs)
-    mean_actual_importance_df = actual_importance_df.groupby("feature").mean()
-    std_actual_importance_df = actual_importance_df.groupby("feature").std()
+    if len(actual_importance_dfs) == 0 or len(random_importance_dfs) == 0:
+        raise ValueError("Importance DataFrames lists cannot be empty.")
 
-    # Calculate the mean random importance
-    random_importance_df = pd.concat(random_importance_dfs)
-    mean_random_importance_df = random_importance_df.groupby("feature").mean()
-    std_random_importance_df = random_importance_df.groupby("feature").std()
+    # Determine the type based on the first DataFrame
+    is_dask = isinstance(actual_importance_dfs[0], dd.DataFrame)
 
-    # Calculate the wasserstein_distance for each feature
-    distances = {}
-    for f in random_importance_df["feature"].unique():
-        distances[f] = wasserstein_distance(
-            actual_importance_df[actual_importance_df["feature"] == f]["importance"].to_numpy(),
-            random_importance_df[random_importance_df["feature"] == f]["importance"].to_numpy(),
-        )
-    mean_actual_importance_df["wasserstein_distance"] = mean_actual_importance_df.index.map(distances)
+    if is_dask:
+        # Concatenate using Dask
+        actual_importance_df = dd.concat(actual_importance_dfs)
+        random_importance_df = dd.concat(random_importance_dfs)
 
-    # Sort by feature name to make sure the order is the same
-    mean_actual_importance_df = mean_actual_importance_df.sort_index()
-    std_actual_importance_df = std_actual_importance_df.sort_index()
-    mean_random_importance_df = mean_random_importance_df.sort_index()
-    std_random_importance_df = std_random_importance_df.sort_index()
+        # Compute Wasserstein distances
+        features = actual_importance_df['feature'].unique().compute()
+        distances = {}
+        for f in features:
+            actual_vals = actual_importance_df[actual_importance_df["feature"] == f]["importance"].compute().to_numpy()
+            random_vals = random_importance_df[random_importance_df["feature"] == f]["importance"].compute().to_numpy()
+            distances[f] = wasserstein_distance(actual_vals, random_vals)
 
-    assert (mean_random_importance_df.index == mean_actual_importance_df.index).all()
+        # Create a DataFrame from distances
+        distance_df = pd.DataFrame({
+            "feature": list(distances.keys()),
+            "wasserstein_distance": list(distances.values())
+        }).set_index("feature")
 
-    mean_actual_importance_df["mean_actual_importance"] = mean_actual_importance_df["importance"]
-    mean_actual_importance_df["std_actual_importance"] = std_actual_importance_df["importance"]
-    mean_actual_importance_df["mean_random_importance"] = mean_random_importance_df["importance"]
-    mean_actual_importance_df["std_random_importance"] = std_random_importance_df["importance"]
-    mean_actual_importance_df["importance"] = mean_actual_importance_df["wasserstein_distance"]
-    return mean_actual_importance_df[
-        [
+        # Group by 'feature' and compute mean and std
+        mean_actual_importance_df = actual_importance_df.groupby("feature").mean().compute()
+        std_actual_importance_df = actual_importance_df.groupby("feature").std().compute()
+
+        mean_random_importance_df = random_importance_df.groupby("feature").mean().compute()
+        std_random_importance_df = random_importance_df.groupby("feature").std().compute()
+
+        # Sort by feature name
+        mean_actual_importance_df = mean_actual_importance_df.sort_index()
+        std_actual_importance_df = std_actual_importance_df.sort_index()
+        mean_random_importance_df = mean_random_importance_df.sort_index()
+        std_random_importance_df = std_random_importance_df.sort_index()
+        distance_df = distance_df.sort_index()
+
+        # Ensure indexes match
+        assert (mean_random_importance_df.index == mean_actual_importance_df.index).all()
+
+        # Assemble the final DataFrame
+        result = mean_actual_importance_df.assign(
+            mean_actual_importance=mean_actual_importance_df["importance"],
+            std_actual_importance=std_actual_importance_df["importance"],
+            mean_random_importance=mean_random_importance_df["importance"],
+            std_random_importance=std_random_importance_df["importance"],
+            importance=distance_df["wasserstein_distance"]
+        )[[
             "importance",
             "mean_actual_importance",
             "mean_random_importance",
             "std_actual_importance",
             "std_random_importance",
             "wasserstein_distance",
-        ]
-    ].reset_index()
+        ]].reset_index()
+
+        return result
+
+    else:
+        # Concatenate using Pandas
+        actual_importance_df = pd.concat(actual_importance_dfs)
+        random_importance_df = pd.concat(random_importance_dfs)
+
+        # Compute Wasserstein distances
+        features = actual_importance_df['feature'].unique()
+        distances = {}
+        for f in features:
+            actual_vals = actual_importance_df[actual_importance_df["feature"] == f]["importance"].to_numpy()
+            random_vals = random_importance_df[random_importance_df["feature"] == f]["importance"].to_numpy()
+            distances[f] = wasserstein_distance(actual_vals, random_vals)
+
+        # Create a DataFrame from distances
+        distance_df = pd.DataFrame({
+            "feature": list(distances.keys()),
+            "wasserstein_distance": list(distances.values())
+        }).set_index("feature")
+
+        # Group by 'feature' and compute mean and std
+        mean_actual_importance_df = actual_importance_df.groupby("feature").mean()
+        std_actual_importance_df = actual_importance_df.groupby("feature").std()
+
+        mean_random_importance_df = random_importance_df.groupby("feature").mean()
+        std_random_importance_df = random_importance_df.groupby("feature").std()
+
+        # Sort by feature name
+        mean_actual_importance_df = mean_actual_importance_df.sort_index()
+        std_actual_importance_df = std_actual_importance_df.sort_index()
+        mean_random_importance_df = mean_random_importance_df.sort_index()
+        std_random_importance_df = std_random_importance_df.sort_index()
+        distance_df = distance_df.sort_index()
+
+        # Ensure indexes match
+        assert (mean_random_importance_df.index == mean_actual_importance_df.index).all()
+
+        # Assemble the final DataFrame
+        result = mean_actual_importance_df.assign(
+            mean_actual_importance=mean_actual_importance_df["importance"],
+            std_actual_importance=std_actual_importance_df["importance"],
+            mean_random_importance=mean_random_importance_df["importance"],
+            std_random_importance=std_random_importance_df["importance"],
+            importance=distance_df["wasserstein_distance"]
+        )[[
+            "importance",
+            "mean_actual_importance",
+            "mean_random_importance",
+            "std_actual_importance",
+            "std_random_importance",
+            "wasserstein_distance",
+        ]].reset_index()
+
+        return result
 
 
 def _compute_one_run(
-    model_builder: ModelBuilderType,
-    model_fitter: ModelFitterType,
-    importance_getter: ModelImportanceGetter,
-    X_builder: XBuilderType,
-    y_builder: YBuilderType,
-    is_random_run: bool,
-    run_idx: int,
+        model_builder: ModelBuilderType,
+        model_fitter: ModelFitterType,
+        importance_getter: ModelImportanceGetter,
+        X_builder: XBuilderType,
+        y_builder: YBuilderType,
+        is_random_run: bool,
+        run_idx: int,
 ):
     model = model_builder(is_random_run=is_random_run, run_idx=run_idx)
     X = X_builder(is_random_run=is_random_run, run_idx=run_idx)
@@ -219,18 +396,23 @@ def _compute_one_run(
 
 @beartype
 def generic_compute(
-    model_builder: ModelBuilderType,
-    model_fitter: ModelFitterType,
-    importance_getter: ModelImportanceGetter,
-    permutation_importance_calculator: Union[
-        PermutationImportanceCalculatorType, List[PermutationImportanceCalculatorType]
-    ],
-    X_builder: XBuilderType,
-    y_builder: YBuilderType,
-    num_actual_runs: PositiveInt = 2,
-    num_random_runs: PositiveInt = 10,
-    native_importance: bool = False,
-) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.DataFrame], List[pd.DataFrame]]:
+        model_builder: ModelBuilderType,
+        model_fitter: ModelFitterType,
+        importance_getter: ModelImportanceGetter,
+        permutation_importance_calculator: TypingUnion[
+            PermutationImportanceCalculatorType, List[PermutationImportanceCalculatorType]
+        ],
+        X_builder: XBuilderType,
+        y_builder: YBuilderType,
+        num_actual_runs: PositiveInt = 2,
+        num_random_runs: PositiveInt = 10,
+        native_importance: bool = False,
+) -> TypingUnion[
+    pd.DataFrame,
+    Tuple[pd.DataFrame, pd.DataFrame],
+    List[pd.DataFrame],
+    Tuple[List[pd.DataFrame], pd.DataFrame],
+]:
     """
     The generic compute function allows customization of the computation. It is used by the `compute` function.
 
@@ -272,22 +454,26 @@ def generic_compute(
     print(f"Running {num_actual_runs} actual runs and {num_random_runs} random runs")
 
     actual_importance_dfs = []
-    for run_idx in tqdm(range(num_actual_runs)):
-        actual_importance_dfs.append(
-            partial_compute_one_run(
-                is_random_run=False,
-                run_idx=run_idx,
-            )
+    for run_idx in tqdm(range(num_actual_runs), desc="Actual Runs"):
+        importance_df = partial_compute_one_run(
+            is_random_run=False,
+            run_idx=run_idx,
         )
+        # Ensure DataFrame is computed if it's a Dask DataFrame
+        if isinstance(importance_df, dd.DataFrame):
+            importance_df = importance_df.compute()
+        actual_importance_dfs.append(importance_df)
 
     random_importance_dfs = []
-    for run_idx in tqdm(range(num_random_runs)):
-        random_importance_dfs.append(
-            partial_compute_one_run(
-                is_random_run=True,
-                run_idx=run_idx,
-            )
+    for run_idx in tqdm(range(num_random_runs), desc="Random Runs"):
+        importance_df = partial_compute_one_run(
+            is_random_run=True,
+            run_idx=run_idx,
         )
+        # Ensure DataFrame is computed if it's a Dask DataFrame
+        if isinstance(importance_df, dd.DataFrame):
+            importance_df = importance_df.compute()
+        random_importance_dfs.append(importance_df)
 
     # Calculate the permutation importance
     if isinstance(permutation_importance_calculator, list):
@@ -342,19 +528,24 @@ def _get_model_importances_attr(model: Any):
 
 @beartype
 def compute(
-    model_cls: Any,
-    model_cls_params: Dict,
-    model_fit_params: Union[ModelFitParamsBuilderType, Dict],
-    X: XType,
-    y: YType,
-    num_actual_runs: PositiveInt = 2,
-    num_random_runs: PositiveInt = 10,
-    shuffle_feature_order: bool = False,
-    permutation_importance_calculator: Union[
-        PermutationImportanceCalculatorType, List[PermutationImportanceCalculatorType]
-    ] = compute_permutation_importance_by_subtraction,
-    native_importance: bool = False,
-) -> Union[pd.DataFrame, Tuple[pd.DataFrame, pd.DataFrame], List[pd.DataFrame]]:
+        model_cls: Any,
+        model_cls_params: Dict,
+        model_fit_params: Union[ModelFitParamsBuilderType, Dict],
+        X: XType,
+        y: YType,
+        num_actual_runs: PositiveInt = 2,
+        num_random_runs: PositiveInt = 10,
+        shuffle_feature_order: bool = False,
+        permutation_importance_calculator: TypingUnion[
+            PermutationImportanceCalculatorType, List[PermutationImportanceCalculatorType]
+        ] = compute_permutation_importance_by_subtraction,
+        native_importance: bool = False,
+) -> TypingUnion[
+    pd.DataFrame,
+    Tuple[pd.DataFrame, pd.DataFrame],
+    List[pd.DataFrame],
+    Tuple[List[pd.DataFrame], pd.DataFrame],
+]:
     """
     Compute the permutation importance of a model given a dataset.
 
@@ -419,16 +610,30 @@ def compute(
                 rng = np.random.default_rng(seed=run_idx)
                 shuffled_columns = rng.permutation(X.columns)
                 return X[shuffled_columns]
-            raise NotImplementedError(  # pragma: no cover
-                "Only support pd.DataFrame when shuffle_feature_order=True"
-            )
+            elif isinstance(X, dd.DataFrame):
+                # Shuffle columns for Dask DataFrame
+                rng = np.random.default_rng(seed=run_idx)
+                shuffled_columns = rng.permutation(X.columns)
+                return X[shuffled_columns]
+            else:
+                raise NotImplementedError(  # pragma: no cover
+                    "Only support pd.DataFrame or dd.DataFrame when shuffle_feature_order=True"
+                )
         return X
 
     def _y_builder(is_random_run: bool, run_idx: int) -> YType:
         rng = np.random.default_rng(seed=run_idx)
         if is_random_run:
             # Only shuffle the target for random runs
-            return rng.permutation(y)
+            if isinstance(y, pd.Series):
+                return y.sample(frac=1, random_state=run_idx).reset_index(drop=True)
+            elif isinstance(y, dd.Series):
+                # Dask Series does not have a direct shuffle method, so compute and shuffle
+                y_pd = y.compute()
+                shuffled_y_pd = y_pd.sample(frac=1, random_state=run_idx).reset_index(drop=True)
+                return dd.from_pandas(shuffled_y_pd, npartitions=y.npartitions)
+            else:
+                return rng.permutation(y)
         return y
 
     def _model_builder(is_random_run: bool, run_idx: int) -> Any:
@@ -440,11 +645,11 @@ def compute(
         return model_cls(**_model_cls_params)
 
     def _model_fitter(model: Any, X: XType, y: YType) -> Any:
-        if isinstance(model_fit_params, dict):  # pragma: no cover
+        if isinstance(model_fit_params, dict):
             _model_fit_params = model_fit_params.copy()
         else:
             _model_fit_params = model_fit_params(
-                list(X.columns) if isinstance(X, pd.DataFrame) else None,
+                list(X.columns) if isinstance(X, pd.DataFrame) or isinstance(X, dd.DataFrame) else None,
             )
         if "Cat" in str(model.__class__):
             _model_fit_params["verbose"] = False
@@ -453,7 +658,7 @@ def compute(
     def _importance_getter(model: Any, X: XType, y: YType) -> pd.DataFrame:
         # This returns the native importances of the model for a single run
         feature_names_attr = _get_feature_names_attr(model)
-        is_pd = isinstance(X, pd.DataFrame)
+        is_pd = isinstance(X, pd.DataFrame) or isinstance(X, dd.DataFrame)
 
         if "MultiOutput" not in str(model.__class__):
             if is_pd:
